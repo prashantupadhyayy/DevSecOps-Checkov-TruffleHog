@@ -1,0 +1,326 @@
+trigger: none
+# trigger:
+#   branches:
+#     include:
+#       - main
+#       - feature/*
+
+pool: linux-pool
+
+parameters:
+  - name: environment
+    displayName: ENVIRONMENT
+    type: string
+    default: dev
+    values:
+      - dev
+      - staging
+
+variables:
+  # Static variables
+  - name: varServiceConnection
+    value: microserviceinfra
+
+  - name: varbackendAzureRmResourceGroupName
+    value: shrutibackend01
+
+  - name: varbackendAzureRmStorageAccountName
+    value: shruti01storage01ac01
+
+  # Dynamic working directory
+  - name: varWorkingDirectory
+    ${{ if eq(parameters.environment, 'dev') }}:
+      value: '$(System.DefaultWorkingDirectory)/infra/dev'
+    ${{ if eq(parameters.environment, 'staging') }}:
+      value: '$(System.DefaultWorkingDirectory)/infra/staging'
+
+  # Conditional variable groups
+  - ${{ if eq(parameters.environment, 'dev') }}:
+      - group: Project03-VariableGroup-Dev
+
+  - ${{ if eq(parameters.environment, 'staging') }}:
+      - group: Project03-VariableGroup-Staging
+
+
+
+
+
+
+stages:
+# =====================================
+# Main branch flow
+# =====================================
+# Stage: terraform install > terraform init
+- stage: MainBranchMerge_TerraformInit
+  displayName: "Branch: (main) - Stage: Terraform Init"
+  condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+  jobs:
+  - job: Main_Init
+    steps:
+    # TEMPLATE --> Terraform INSTALL & INIT
+    - template: templates/terraform-init.yml
+      parameters:
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        serviceConnection: ${{ variables.varServiceConnection }}
+        backendRg: ${{ variables.varbackendAzureRmResourceGroupName }}
+        backendStorage: ${{ variables.varbackendAzureRmStorageAccountName }}
+        backendContainer: $(backendAzureRmContainerName)
+        backendKey: $(backendAzureRmKey)
+
+# Stage: Manual Validation > terraform install > terraform init > terraform plan
+- stage: MainBranchMerge_Approval
+  displayName: "Branch: (main) - Stage: Approval"
+  dependsOn: MainBranchMerge_TerraformInit
+  condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+  jobs:
+  - job: Main_Approval_Init_Plan
+    pool: server   # ✅ REQUIRED for ManualValidation
+    steps:
+    # Manual Validation
+    - task: ManualValidation@0
+      inputs:
+        notifyUsers: 'ankur@example.com'
+        instructions: 'Approve to proceed with Terraform Plan for main branch.'
+
+# Stage: Manual Validation > terraform install > terraform init > terraform plan
+- stage: MainBranchMerge_TerraformInitPlan
+  displayName: "Branch: (main) - Stage: Init, Plan"
+  dependsOn: MainBranchMerge_Approval
+  condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+  jobs:
+  - job: Main_Init_Plan
+    steps:
+    # Terraform INSTALL
+    - task: TerraformInstaller@1
+      displayName: 'Task: terraform install'
+      inputs:
+        terraformVersion: 'latest'
+        
+    # Terraform INIT
+    - task: TerraformTaskV4@4
+      displayName: 'Task: terraform init'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        backendServiceArm: '$(selected_service_connection)'
+        backendAzureRmResourceGroupName: '$(varbackendAzureRmResourceGroupName)'
+        backendAzureRmStorageAccountName: '$(varbackendAzureRmStorageAccountName)'
+        backendAzureRmContainerName: '$(selectedVG_varbackendAzureRmContainerName)'
+        backendAzureRmKey: '$(selectedVG_varbackendAzureRmKey)'
+
+    # Terraform PLAN
+    - task: TerraformTaskV4@4
+      displayName: 'Task: terraform plan'
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        environmentServiceNameAzureRM: '$(selected_service_connection)'
+
+# =====================================
+# Feature branch flow
+# =====================================
+
+# Stage: terraform install > terraform init
+- stage: FeatureBranchMerge_TerraformInit
+  displayName: "Branch: (feature) - Stage: Terraform Init"
+  condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+  jobs:
+  - job: Feature_Init
+    steps:
+    # Terraform INSTALL
+    - task: TerraformInstaller@1
+      displayName: 'Task: terraform install'
+      inputs:
+        terraformVersion: 'latest'
+
+    # Terraform INIT
+    - task: TerraformTaskV4@4
+      displayName: 'Task: terraform init'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        backendServiceArm: '$(selected_service_connection)'
+        backendAzureRmResourceGroupName: '$(varbackendAzureRmResourceGroupName)'
+        backendAzureRmStorageAccountName: '$(varbackendAzureRmStorageAccountName)'
+        backendAzureRmContainerName: '$(selectedVG_varbackendAzureRmContainerName)'
+        backendAzureRmKey: '$(selectedVG_varbackendAzureRmKey)'
+
+# Stage: terraform install > terraform init > terraform validate
+- stage: FeatureBranchMerge_TerraformInitValidate
+  displayName: "Branch: (feature) - Stage: Terraform Init, Validate"
+  dependsOn: FeatureBranchMerge_TerraformInit
+  condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+  jobs:
+  - job: Feature_Init_Validate
+    steps:
+
+    # Terraform INSTALL
+    - task: TerraformInstaller@1
+      displayName: 'Task: terraform install'
+      inputs:
+        terraformVersion: 'latest'
+
+    # Terraform INIT
+    - task: TerraformTaskV4@4
+      displayName: 'Task: terraform init'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        backendServiceArm: '$(selected_service_connection)'
+        backendAzureRmResourceGroupName: '$(varbackendAzureRmResourceGroupName)'
+        backendAzureRmStorageAccountName: '$(varbackendAzureRmStorageAccountName)'
+        backendAzureRmContainerName: '$(selectedVG_varbackendAzureRmContainerName)'
+        backendAzureRmKey: '$(selectedVG_varbackendAzureRmKey)'
+
+    # Terraform VALIDATE
+    - task: TerraformTaskV4@4
+      displayName: 'Task: terraform validate'
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+
+- stage: FeatureBranchMerge_TerraformLintAndSecurity
+  displayName: "Stage: TFLint and TFsec Scan"
+  dependsOn: FeatureBranchMerge_TerraformInitValidate
+  condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+  jobs:
+  - job: LintAndSecurity
+    displayName: "Run TFLint and TFsec"
+    pool: linux-pool
+      #vmImage: 'ubuntu-latest'
+    steps:
+
+    # Checkout code
+    - checkout: self
+
+    # Install TFLint
+    - script: |
+        echo "Installing TFLint..."
+        curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+        tflint --version
+      displayName: "Install TFLint"
+
+    # Run TFLint
+    - script: |
+        echo "Running TFLint..."
+        cd ${{ variables.varWorkingDirectory }}
+        tflint --init
+        tflint --recursive --enable-rule=terraform_required_providers
+      displayName: "Run TFLint Analysis"
+
+    # Generate JSON Report
+    - script: |
+        cd ${{ variables.varWorkingDirectory }}
+        echo "Generating TFLint JSON report..."
+        tflint --format json > $(System.DefaultWorkingDirectory)/tflint-report.json || true
+      displayName: "Generate TFLint Report"
+
+    # Publish Report Artifact
+    - publish: $(System.DefaultWorkingDirectory)/tflint-report.json
+      artifact: TFLintReport_${{ parameters.environment }}
+
+    # Install Trivy (Official APT Method)
+    - script: |
+        echo "Installing Trivy..."
+        sudo apt-get update -y
+        sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update -y
+        sudo apt-get install -y trivy
+        trivy --version
+      displayName: "Install Trivy"
+
+    # Run Trivy Terraform Config Scan
+    - script: |
+        echo "Running Trivy Terraform config scan..."
+        cd ${{ variables.varWorkingDirectory }}
+        
+        tfvars_file=$(find . -maxdepth 1 -name "*.tfvars" | head -n 1)
+        if [ -n "$tfvars_file" ]; then
+          echo "Using tfvars file: $tfvars_file"
+          trivy config --tfvars "$tfvars_file" \
+                      --severity HIGH,CRITICAL \
+                      --format json \
+                      --output trivy-report.json . || true
+        else
+          echo "No tfvars file found. Running without tfvars..."
+          trivy config --severity HIGH,CRITICAL \
+                      --format json \
+                      --output trivy-report.json . || true
+        fi
+
+        echo "Verifying Trivy report..."
+        ls -l trivy-report.json || echo "⚠️ trivy-report.json not found!"
+      displayName: "Run Trivy Config Scan"
+
+    # Check and copy Trivy report to known location
+    - script: |
+        echo "Checking for Trivy report before publishing..."
+        if [ -f "${{ variables.varWorkingDirectory }}/trivy-report.json" ]; then
+          echo "✅ Trivy report found, ready for publish."
+        else
+          echo "⚠️ No Trivy report found at ${{ variables.varWorkingDirectory }}/trivy-report.json"
+          echo "{}" > ${{ variables.varWorkingDirectory }}/trivy-report.json
+        fi
+      displayName: "Verify Trivy Report File"
+
+    # Publish Trivy Report
+    - publish: ${{ variables.varWorkingDirectory }}/trivy-report.json
+      artifact: TrivyReport_${{ parameters.environment }}
+      displayName: "Publish Trivy Report"
+
+- stage: FeatureBranchMerge_Approval
+  displayName: "Branch: (feature) - Stage: Approval before Fmt (feature)"
+  dependsOn: FeatureBranchMerge_TerraformLintAndSecurity
+  condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+  jobs:
+  - job: Feature_Approval
+    pool: server   # ✅ REQUIRED for ManualValidation
+    steps:
+    - task: ManualValidation@0
+      inputs:
+        notifyUsers: 'ankur@example.com'
+        instructions: 'Approve to run Terraform Fmt on feature branch.'
+
+# Stage: terraform install > terraform init > terraform fmt
+- stage: FeatureBranchMerge_TerraformFmt
+  displayName: "Branch: (feature) - Stage: Terraform Init, Fmt"
+  dependsOn: FeatureBranchMerge_Approval
+  condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+  jobs:
+  - job: Feature_Init_Fmt
+    steps:
+    # Terraform INSTALL
+    - task: TerraformInstaller@1
+      displayName: 'Task: terraform install'
+      inputs:
+        terraformVersion: 'latest'
+
+    # Terraform INIT
+    - task: TerraformTaskV4@4
+      displayName: 'Task: terraform init'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        backendServiceArm: '$(selected_service_connection)'
+        backendAzureRmResourceGroupName: '$(varbackendAzureRmResourceGroupName)'
+        backendAzureRmStorageAccountName: '$(varbackendAzureRmStorageAccountName)'
+        backendAzureRmContainerName: '$(selectedVG_varbackendAzureRmContainerName)'
+        backendAzureRmKey: '$(selectedVG_varbackendAzureRmKey)'
+
+    # Terraform FMT
+    - task: TerraformTaskV4@4
+      displayName: 'Task: terraform fmt'
+      inputs:
+        provider: 'azurerm'
+        command: 'custom'
+        customCommand: 'fmt'
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        environmentServiceNameAzureRM: '$(selected_service_connection)'

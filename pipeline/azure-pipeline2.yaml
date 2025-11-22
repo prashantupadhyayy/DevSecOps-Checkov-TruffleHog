@@ -1,0 +1,446 @@
+#trigger: none
+trigger:
+  branches:
+    include:
+      - main
+      - feature/*
+
+pool: linux-pool
+
+parameters:
+  - name: environment
+    displayName: ENVIRONMENT
+    type: string
+    default: dev
+    values:
+      - dev
+      - staging
+
+variables:
+  - name: varServiceConnection
+    value: microserviceinfra
+
+  - name: varbackendAzureRmResourceGroupName
+    value: shrutibackend01
+
+  - name: varbackendAzureRmStorageAccountName
+    value: shruti01storage01ac01
+
+  - name: varWorkingDirectory
+    ${{ if eq(parameters.environment, 'dev') }}:
+      value: '$(System.DefaultWorkingDirectory)/infra/dev'
+    ${{ if eq(parameters.environment, 'staging') }}:
+      value: '$(System.DefaultWorkingDirectory)/infra/staging'
+
+  - ${{ if eq(parameters.environment, 'dev') }}:
+      - group: Project03-VariableGroup-Dev
+
+  - ${{ if eq(parameters.environment, 'staging') }}:
+      - group: Project03-VariableGroup-Staging
+
+
+stages:
+
+# ======================================================================
+# MAIN BRANCH
+# ======================================================================
+
+- stage: MainBranchMerge_TerraformInit
+  displayName: "main: Terraform Init"
+  condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+  jobs:
+  - job: Main_Init
+    steps:
+    - template: templates/terraform-init.yml
+      parameters:
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        serviceConnection: $(selected_service_connection)
+        backendRg: $(backendAzureRmResourceGroupName)
+        backendStorage: $(backendAzureRmStorageAccountName)
+        backendContainer: $(selectedVG_varbackendAzureRmContainerName)
+        backendKey: $(selectedVG_varbackendAzureRmKey)
+
+- stage: MainBranchMerge_Approval
+  displayName: "main: Approval"
+  dependsOn: MainBranchMerge_TerraformInit
+  condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+  jobs:
+  - job: Main_Approval_Init_Plan
+    pool: server
+    steps:
+    - task: ManualValidation@0
+      inputs:
+        notifyUsers: 'ankur@example.com'
+        instructions: 'Approve to proceed with Terraform Plan.'
+
+- stage: MainBranchMerge_TerraformInitPlan
+  displayName: "main: Terraform Init + Plan"
+  dependsOn: MainBranchMerge_Approval
+  condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+  jobs:
+  - job: Main_Init_Plan
+    steps:
+    - task: TerraformInstaller@1
+      inputs:
+        terraformVersion: latest
+
+    - task: TerraformTaskV4@4
+      displayName: 'Terraform init'
+      inputs:
+        provider: azurerm
+        command: init
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        backendServiceArm: $(selected_service_connection)
+        backendAzureRmResourceGroupName: $(backendAzureRmResourceGroupName)
+        backendAzureRmStorageAccountName: $(backendAzureRmStorageAccountName)
+        backendAzureRmContainerName: $(selectedVG_varbackendAzureRmContainerName)
+        backendAzureRmKey: $(selectedVG_varbackendAzureRmKey)
+
+    - task: TerraformTaskV4@4
+      displayName: 'Terraform plan'
+      inputs:
+        provider: azurerm
+        command: plan
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        environmentServiceNameAzureRM: $(selected_service_connection)
+
+
+# ======================================================================
+# FEATURE BRANCH
+# ======================================================================
+
+
+- stage: FeatureBranchMerge_TerraformInit
+  displayName: "feature: Terraform Init"
+  condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+  jobs:
+    - job: Feature_Init
+      steps:
+        - task: TerraformInstaller@1
+          inputs:
+            terraformVersion: latest
+
+        - task: TerraformTaskV4@4
+          displayName: 'Terraform init'
+          inputs:
+            provider: azurerm
+            command: init
+            workingDirectory: ${{ variables.varWorkingDirectory }}
+            backendServiceArm: $(selected_service_connection)
+            backendAzureRmResourceGroupName: $(varbackendAzureRmResourceGroupName)
+            backendAzureRmStorageAccountName: $(varbackendAzureRmStorageAccountName)
+            backendAzureRmContainerName: $(selectedVG_varbackendAzureRmContainerName)
+            backendAzureRmKey: $(selectedVG_varbackendAzureRmKey)
+
+- stage: FeatureBranchMerge_TerraformInitValidate
+  displayName: "feature: Init + Validate"
+  dependsOn: FeatureBranchMerge_TerraformInit
+  condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+  jobs:
+    - job: Feature_Init_Validate
+      steps:
+        - task: TerraformInstaller@1
+          inputs:
+            terraformVersion: latest
+
+        - task: TerraformTaskV4@4
+          displayName: 'Terraform init'
+          inputs:
+            provider: azurerm
+            command: init
+            workingDirectory: ${{ variables.varWorkingDirectory }}
+            backendServiceArm: $(selected_service_connection)
+            backendAzureRmResourceGroupName: $(varbackendAzureRmResourceGroupName)
+            backendAzureRmStorageAccountName: $(varbackendAzureRmStorageAccountName)
+            backendAzureRmContainerName: $(selectedVG_varbackendAzureRmContainerName)
+            backendAzureRmKey: $(selectedVG_varbackendAzureRmKey)
+
+        - task: TerraformTaskV4@4
+          displayName: 'Terraform validate'
+          inputs:
+            provider: azurerm
+            command: validate
+            workingDirectory: ${{ variables.varWorkingDirectory }}
+
+
+# ======================================================================
+# SECURITY STAGE (Checkov + TruffleHog)
+# ======================================================================
+
+- stage: FeatureBranchMerge_TerraformSecurityChecks
+  displayName: "Security: Checkov + TruffleHog"
+  dependsOn: FeatureBranchMerge_TerraformInitValidate
+  condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+  jobs:
+  - job: SecurityChecks
+    pool: linux-pool
+    steps:
+
+    - checkout: self
+
+    # -----------------------------------------
+    # Install Python + Tools
+    # -----------------------------------------
+    - script: |
+        sudo apt-get update -y
+        sudo apt-get install -y python3 python3-pip python3-venv
+
+        python3 -m venv security-venv
+        source security-venv/bin/activate
+
+        pip install --upgrade pip
+        pip install checkov trufflehog
+      displayName: "Install Checkov + TruffleHog"
+
+  # 1. Correct Cleanup
+    - script: |
+        echo "Cleaning artifact directory..."
+        rm -rf "$(Build.ArtifactStagingDirectory)"
+        mkdir -p "$(Build.ArtifactStagingDirectory)/reports"
+      displayName: "Cleanup old artifacts"
+
+    - script: |
+        source security-venv/bin/activate
+        cd ${{ variables.varWorkingDirectory }}
+
+        checkov -d . \
+          --soft-fail \
+          --output json \
+          | tee "$(Build.ArtifactStagingDirectory)/reports/checkov.json"
+      displayName: "Run Checkov"
+
+    # 3. Validate Output (Add this!)
+    - script: |
+        if [ -d "$(Build.ArtifactStagingDirectory)/reports/checkov.json" ]; then
+          echo "❌ ERROR: Checkov output is a directory!"
+          exit 1
+        fi
+        echo "✔ checkov.json output file verified"
+      displayName: "Validate Checkov Output"
+
+    # 4. Show files (debug)
+    - script: |
+        ls -lah "$(Build.ArtifactStagingDirectory)/reports"
+      displayName: "DEBUG — Show generated files"
+
+
+        # -----------------------------------------
+        # Generate Checkov Markdown
+        # -----------------------------------------
+    - script: |
+        python3 << 'EOF'
+        import json, os
+
+        artifact = os.environ["BUILD_ARTIFACTSTAGINGDIRECTORY"]
+        json_file = os.path.join(artifact, "reports", "checkov.json")
+        md_file = os.path.join(artifact, "reports", "checkov.md")
+
+        with open(json_file) as f:
+            data = json.load(f)
+
+        md = "# Checkov Report\n\n"
+        for item in data.get("results", {}).get("failed_checks", []):
+            md += f"## ❌ {item['check_name']} ({item['check_id']})\n"
+            md += f"- **File:** {item['file_path']}\n"
+            md += f"- **Resource:** {item.get('resource')}\n"
+            md += f"- **Guideline:** {item.get('guideline')}\n"
+            md += "---\n"
+
+        with open(md_file, "w") as f:
+            f.write(md)
+        EOF
+      displayName: "Generate Checkov Markdown"
+
+
+    # -----------------------------------------
+    # Publish Checkov artifacts
+    # -----------------------------------------
+    - publish: $(Build.ArtifactStagingDirectory)/reports/checkov.json
+      artifact: Checkov_JSON
+
+    - publish: $(Build.ArtifactStagingDirectory)/reports/checkov.md
+      artifact: Checkov_MD
+
+    # -----------------------------------------
+    # # Run TruffleHog
+    # # -----------------------------------------
+    # - script: |
+    #     source security-venv/bin/activate
+    #     trufflehog filesystem ${{ variables.varWorkingDirectory }} \
+    #       --json > "$(Build.ArtifactStagingDirectory)/reports/trufflehog.json"
+    #   displayName: "Run TruffleHog"
+
+    # - publish: $(Build.ArtifactStagingDirectory)/reports/trufflehog.json
+    #   artifact: TruffleHog_JSON
+
+    # Install Checkov + TruffleHog v3
+    - script: |
+        sudo apt-get update -y
+        sudo apt-get install -y python3 python3-pip python3-venv
+
+        python3 -m venv security-venv
+        source security-venv/bin/activate
+
+        pip install --upgrade pip
+      displayName: "Install Checkov + TruffleHog"
+
+    # -----------------------------------------
+# Run TruffleHog v3 (Docker) — Final Working Version
+# -----------------------------------------
+    # - script: |
+    #     echo "Running TruffleHog v3 filesystem scan..."
+
+    #     sudo chmod -R 777 "$(System.DefaultWorkingDirectory)"
+
+    #     # Run TruffleHog and capture BOTH stdout + stderr
+    #     docker run --rm \
+    #       -v "$(System.DefaultWorkingDirectory)":/repo \
+    #       trufflesecurity/trufflehog:latest \
+    #       filesystem /repo --json 2>&1 \
+    #       | grep '^{\"' \
+    #       > "$(Build.ArtifactStagingDirectory)/reports/trufflehog.json"
+
+    #     echo "TruffleHog scan completed."
+    #   displayName: "Run TruffleHog v3 (Docker)"
+    - script: |
+          echo "Running TruffleHog v3 filesystem scan..."
+
+            sudo chmod -R 777 "${{ variables.varWorkingDirectory }}"
+
+            docker run --rm \
+              -v "${{ variables.varWorkingDirectory }}":/repo \
+              trufflesecurity/trufflehog:latest \
+              filesystem /repo --json 2>&1 \
+              | grep '^{\"' \
+              > "$(Build.ArtifactStagingDirectory)/reports/trufflehog.json"
+
+            echo "TruffleHog scan completed."
+      displayName: "Run TruffleHog v3 (Docker)"
+
+    # -----------------------------------------
+    # Debug — Show output file (keep this)
+    # -----------------------------------------
+    - script: |
+        echo "Listing TruffleHog output:"
+        ls -lah "$(Build.ArtifactStagingDirectory)/reports"
+        echo "-----"
+        head -n 50 "$(Build.ArtifactStagingDirectory)/reports/trufflehog.json"
+      displayName: "DEBUG — Show TruffleHog JSON Preview"
+
+    # -----------------------------------------
+    # Publish TruffleHog JSON Artifact
+    # -----------------------------------------
+    - publish: $(Build.ArtifactStagingDirectory)/reports/trufflehog.json
+      artifact: TruffleHog_JSON
+      displayName: "Publish TruffleHog JSON"
+  # -----------------------------------------
+    - script: |
+        echo "Generating Markdown report from trufflehog.json..."
+
+        python3 << 'EOF'
+        import json
+        import os
+
+        artifact_dir = os.environ["BUILD_ARTIFACTSTAGINGDIRECTORY"]
+        json_file = os.path.join(artifact_dir, "reports", "trufflehog.json")
+        md_file = os.path.join(artifact_dir, "reports", "trufflehog.md")
+
+        findings = []
+
+        # Read JSONL file line by line
+        with open(json_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    data = json.loads(line)
+                    # Only include real findings (skip logs)
+                    if "DetectorName" not in data:
+                        continue
+                    findings.append(data)
+                except:
+                    pass
+
+        md = "# 🔐 TruffleHog Secrets Scan Report\n\n"
+
+        if not findings:
+            md += "### ✔ No secrets found in the scanned directory.\n\n"
+        else:
+            md += f"### ⚠ Found {len(findings)} potential secret(s)\n\n"
+            for i, item in enumerate(findings, 1):
+                md += f"## #{i} — {item.get('DetectorName')}\n"
+                md += f"- **File:** {item.get('SourceMetadata', {}).get('Data', {}).get('Filesystem', {}).get('file')}\n"
+                md += f"- **Verified:** {item.get('Verified')}\n"
+                md += f"- **Raw (sanitized):** `{item.get('Redacted')}`\n"
+                md += f"- **Description:** {item.get('DetectorDescription')}\n"
+                md += "\n---\n"
+
+        with open(md_file, "w") as f:
+            f.write(md)
+
+        print("Markdown report generated:", md_file)
+        EOF
+      displayName: "Generate TruffleHog Markdown Report"
+    -  publish: $(Build.ArtifactStagingDirectory)/reports/trufflehog.md
+       artifact: TruffleHog_MD
+       displayName: "Publish TruffleHog MD"
+
+
+
+# ======================================================================
+# FEATURE APPROVAL
+# ======================================================================
+
+- stage: FeatureBranchMerge_Approval
+  displayName: "feature: Approval"
+  dependsOn: FeatureBranchMerge_TerraformSecurityChecks
+  condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+  jobs:
+  - job: Approve
+    pool: server
+    steps:
+    - task: ManualValidation@0
+      inputs:
+        notifyUsers: 'ankur@example.com'
+        instructions: 'Approve fmt'
+
+# ======================================================================
+# FEATURE FMT
+# ======================================================================
+
+- stage: FeatureBranchMerge_TerraformFmt
+  displayName: "feature: fmt"
+  dependsOn: FeatureBranchMerge_Approval
+  condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+  jobs:
+  - job: Fmt
+    steps:
+    - task: TerraformInstaller@1
+      inputs:
+        terraformVersion: latest
+
+    - task: TerraformTaskV4@4
+      inputs:
+        provider: azurerm
+        command: init
+        # workingDirectory: ${{ variables.varWorkingDirectory }}
+        # backendServiceArm: $(selected_service_connection)
+        # backendAzureRmResourceGroupName: $(backendAzureRmResourceGroupName)
+        # backendAzureRmStorageAccountName: $(backendAzureRmStorageAccountName)
+        # backendAzureRmContainerName: $(selectedVG_varbackendAzureRmContainerName)
+        # backendAzureRmKey: $(selectedVG_varbackendAzureRmKey)
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        backendServiceArm: $(selected_service_connection)
+        backendAzureRmResourceGroupName: $(varbackendAzureRmResourceGroupName)
+        backendAzureRmStorageAccountName: $(varbackendAzureRmStorageAccountName)
+        backendAzureRmContainerName: $(selectedVG_varbackendAzureRmContainerName)
+        backendAzureRmKey: $(selectedVG_varbackendAzureRmKey)
+
+    - task: TerraformTaskV4@4
+      inputs:
+        provider: azurerm
+        command: custom
+        customCommand: fmt
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        environmentServiceNameAzureRM: $(selected_service_connection)

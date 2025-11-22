@@ -1,0 +1,214 @@
+trigger:
+  branches:
+    include:
+      - main
+      - feature/*
+
+pool:
+  vmImage: 'ubuntu-latest'
+  # name: 'AgentPool-09NOV2025'
+
+parameters:
+  - name: environment
+    displayName: ENVIRONMENT
+    type: string
+    default: dev
+    values:
+      - dev
+      - staging
+
+variables:
+- name: varServiceConnection
+  value: ServiceConnection-09NOV2025
+
+- name: varbackendAzureRmResourceGroupName
+  value: ankurbackend01
+
+- name: varbackendAzureRmStorageAccountName
+  value: ankur01storage01ac01
+
+# Selected values based on parameter: dev or staging
+- name: selected_service_connection
+  value: ${{ variables.varServiceConnection }}
+
+- ${{ if eq(parameters.environment, 'dev') }}:
+  - group: Project02-VariableGroup-Dev
+  - name: varWorkingDirectory
+    value: '$(System.DefaultWorkingDirectory)/infra/dev'
+
+- ${{ if eq(parameters.environment, 'staging') }}:
+  - group: Project02-VariableGroup-Staging
+  - name: varWorkingDirectory
+    value: '$(System.DefaultWorkingDirectory)/infra/staging'
+
+
+stages:
+# =====================================
+# Main branch flow
+# =====================================
+- stage: MainApproval
+  displayName: "Approval before Plan (main)"
+  condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+  jobs:
+  - job: Approval
+    pool: server
+    steps:
+    - task: ManualValidation@0
+      inputs:
+        notifyUsers: 'ankur@example.com'
+        instructions: 'Approve to proceed with Terraform Plan for main branch.'
+
+# Stage: terraform install > terraform init > terraform plan
+- stage: TerraformPlan
+  displayName: "Stage: Terraform Plan"
+  dependsOn: MainApproval
+  condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+  jobs:
+  - job: Plan
+    steps:
+    # Terraform INSTALL
+    - task: TerraformInstaller@1
+      displayName: 'Task: terraform install'
+      inputs:
+        terraformVersion: 'latest'
+        
+    # Terraform INIT
+    - task: TerraformTaskV4@4
+      displayName: 'Task: terraform init'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        backendServiceArm: '$(selected_service_connection)'
+        backendAzureRmResourceGroupName: '$(varbackendAzureRmResourceGroupName)'
+        backendAzureRmStorageAccountName: '$(varbackendAzureRmStorageAccountName)'
+        backendAzureRmContainerName: '$(selectedVG_varbackendAzureRmContainerName)'
+        backendAzureRmKey: '$(selectedVG_varbackendAzureRmKey)'
+
+    # Terraform PLAN
+    - task: TerraformTaskV4@4
+      displayName: 'Task: terraform plan'
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        environmentServiceNameAzureRM: '$(selected_service_connection)'
+
+# =====================================
+# Feature branch flow
+# =====================================
+
+# Stage: terraform install > terraform init
+- stage: TerraformInit
+  displayName: "Stage: Terraform Init"
+  condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+  jobs:
+  - job: Init
+    steps:
+
+    # Terraform INSTALL
+    - task: TerraformInstaller@1
+      displayName: 'Task: terraform install'
+      inputs:
+        terraformVersion: 'latest'
+
+    # Terraform INIT
+    - task: TerraformTaskV4@4
+      displayName: 'Task: terraform init'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        backendServiceArm: '$(selected_service_connection)'
+        backendAzureRmResourceGroupName: '$(varbackendAzureRmResourceGroupName)'
+        backendAzureRmStorageAccountName: '$(varbackendAzureRmStorageAccountName)'
+        backendAzureRmContainerName: '$(selectedVG_varbackendAzureRmContainerName)'
+        backendAzureRmKey: '$(selectedVG_varbackendAzureRmKey)'
+
+# Stage: terraform install > terraform init > terraform validate
+- stage: TerraformValidate
+  displayName: "Stage: Terraform Validate"
+  dependsOn: TerraformInit
+  condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+  jobs:
+  - job: Validate
+    steps:
+
+    # Terraform INSTALL
+    - task: TerraformInstaller@1
+      displayName: 'Task: terraform install'
+      inputs:
+        terraformVersion: 'latest'
+
+    # Terraform INIT
+    - task: TerraformTaskV4@4
+      displayName: 'Task: terraform init'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        backendServiceArm: '$(selected_service_connection)'
+        backendAzureRmResourceGroupName: '$(varbackendAzureRmResourceGroupName)'
+        backendAzureRmStorageAccountName: '$(varbackendAzureRmStorageAccountName)'
+        backendAzureRmContainerName: '$(selectedVG_varbackendAzureRmContainerName)'
+        backendAzureRmKey: '$(selectedVG_varbackendAzureRmKey)'
+
+    # Terraform VALIDATE
+    - task: TerraformTaskV4@4
+      displayName: 'Task: terraform validate'
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+
+- stage: FeatureApproval
+  displayName: "Stage: Approval before Fmt (feature)"
+  dependsOn: TerraformValidate
+  condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+  jobs:
+  - job: Approval
+    pool: server
+    steps:
+    - task: ManualValidation@0
+      inputs:
+        notifyUsers: 'ankur@example.com'
+        instructions: 'Approve to run Terraform Fmt on feature branch.'
+
+# Stage: terraform install > terraform init > terraform fmt
+- stage: TerraformFmt
+  displayName: "Stage: Terraform Fmt"
+  dependsOn: FeatureApproval
+  condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+  jobs:
+  - job: Fmt
+    steps:
+
+    # Terraform INSTALL
+    - task: TerraformInstaller@1
+      displayName: 'Task: terraform install'
+      inputs:
+        terraformVersion: 'latest'
+
+    # Terraform INIT
+    - task: TerraformTaskV4@4
+      displayName: 'Task: terraform init'
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        backendServiceArm: '$(selected_service_connection)'
+        backendAzureRmResourceGroupName: '$(varbackendAzureRmResourceGroupName)'
+        backendAzureRmStorageAccountName: '$(varbackendAzureRmStorageAccountName)'
+        backendAzureRmContainerName: '$(selectedVG_varbackendAzureRmContainerName)'
+        backendAzureRmKey: '$(selectedVG_varbackendAzureRmKey)'
+
+    # Terraform FMT
+    - task: TerraformTaskV4@4
+      displayName: 'Task: terraform fmt'
+      inputs:
+        provider: 'azurerm'
+        command: 'custom'
+        customCommand: 'fmt'
+        workingDirectory: ${{ variables.varWorkingDirectory }}
+        environmentServiceNameAzureRM: '$(selected_service_connection)'
+
